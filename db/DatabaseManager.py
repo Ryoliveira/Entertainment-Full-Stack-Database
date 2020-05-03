@@ -1,8 +1,12 @@
 import mysql.connector
 import mysql.connector.errors
 import requests
+import os
+import multiprocessing
+from multiprocessing import Pool
 
-IMDB_ID_MAX = 9916880
+
+
 
 CHECK_FOR_ID_QUERY = """SELECT * 
                             FROM media 
@@ -28,15 +32,17 @@ ADD_MEDIA_RATINGS = """INSERT INTO media_rating
                                 VALUES (%s, %s, %s)"""
 
 # get key at http://www.omdbapi.com/
-KEY = ""
+KEY = os.environ.get('OMDB_KEY')
 URL = "http://www.omdbapi.com/"
+IMDB_ID_MAX = 9916880
+PROCESS_LIMIT = multiprocessing.cpu_count()
 
 
 def get_connection():
-    connection = mysql.connector.connect(host='localhost',
-                                         database='full-stack-entertainment',
-                                         user='entertainmentDb',
-                                         password='entertainmentDb')
+    connection = mysql.connector.connect(host=os.environ.get('HOST'),
+                                         database=os.environ.get('DATABASE'),
+                                         user=os.environ.get('USER'),
+                                         password=os.environ.get('PASSWORD'))
     return connection
 
 
@@ -103,44 +109,46 @@ def insert_ratings(cursor, media_id, data):
         cursor.execute(ADD_MEDIA_RATINGS, media_rating_data)
 
 
-def run():
+def run_process(temp_id):
     params = {"apikey": KEY, "i": ""}
-    data_success_count = 1
 
     connection = get_connection()
     cursor = connection.cursor(buffered=True)
 
-    start = get_check_point() + 1
-    for temp_id in range(start, IMDB_ID_MAX):
+    imdb_id = "tt" + ('%0*d' % (7, temp_id))
 
-        imdb_id = "tt" + ('%0*d' % (7, temp_id))
+    cursor.execute(CHECK_FOR_ID_QUERY, (imdb_id,))
+    media_not_in_table = cursor.rowcount == 0
 
-        cursor.execute(CHECK_FOR_ID_QUERY, (imdb_id,))
-        media_not_in_table = cursor.rowcount == 0
+    if media_not_in_table:
+        try:
+            data = get_data(URL, params, imdb_id)
+            if data == -1:
+                return
+            insert_media_data(cursor, data)
+        except mysql.connector.Error and TypeError:
+            print("Error entering data into table")
+            return
 
-        if media_not_in_table:
-            try:
-                data = get_data(URL, params, imdb_id)
-                if data == -1:
-                    continue
-                insert_media_data(cursor, data)
-                data_success_count += 1
-            except mysql.connector.Error and TypeError:
-                print("Error entering data into table")
-                continue
-
-            if data_success_count % 100 == 0:
-                connection.commit()
-                print("Entries Committed")
-                set_check_point(temp_id)
-
-        else:
-            print("Media already added to table")
+    else:
+        print("Media already added to table")
 
     cursor.close()
     connection.commit()
-    print("Final commit completed")
     connection.close()
+
+
+def run():
+    start = get_check_point() + 1
+    for temp_id in range(start, IMDB_ID_MAX, PROCESS_LIMIT):
+        temp_ids = [x for x in range(temp_id, temp_id+PROCESS_LIMIT)]
+
+        with Pool(PROCESS_LIMIT) as p:
+            p.map(run_process, temp_ids)
+
+        print("Committed Entries")
+        set_check_point(temp_id)
+        print("Check Point Saved ")
 
 
 if __name__ == "__main__":
